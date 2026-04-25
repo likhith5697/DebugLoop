@@ -1297,6 +1297,334 @@ But you earn it through discipline — clear boundaries, well-defined contracts,
 
 Not through enthusiasm about the technology.`,
   },
+  {
+    slug: 'kubernetes-debugging-layers',
+    title: 'After a Few Real Production Incidents, Your Kubernetes Debugging Approach Changes Completely',
+    date: '2026-04-25',
+    author: 'Likhith Venkata',
+    readTime: '8 min read',
+    category: 'DevOps',
+    preview: "You stop chasing symptoms and start isolating layers. This is the difference between someone who deploys on Kubernetes and someone who can be trusted with production. Here's how real-world debugging actually works.",
+    content: `# 🚀 After a Few Real Production Incidents, Your Kubernetes Debugging Approach Changes Completely
+
+You stop chasing symptoms…  
+and start isolating layers.
+
+This is the difference between someone who *deploys* on Kubernetes…  
+and someone who can be trusted with production.
+
+Here's how real-world debugging actually works 👇
+
+---
+
+## 🎯 The Expected Flow (What We Say in Design Docs)
+
+When we design our systems, everything looks clean:
+
+- Build Docker image 🐳  
+- Push to container registry  
+- Deploy to cluster  
+- Pods run → system works ✅  
+
+This is the happy path. The path where nothing can go wrong.
+
+But production has a way of exposing every assumption we've made.
+
+---
+
+## 🔥 Reality (What Breaks in Production)
+
+After working on real incidents, you learn one thing: **debug layer by layer**.
+
+Not every problem is what it looks like. Most "Kubernetes failures" aren't Kubernetes problems at all.
+
+Let me walk you through each layer.
+
+---
+
+## 1️⃣ Image Layer (Nothing Runs If This Fails)
+
+This is where everything starts. If the image can't pull, nothing else matters.
+
+### Common Issues:
+
+- **401 pulling image** 🔐 — Authentication expired or misconfigured
+- **Wrong tag** 🏷️ — Pointing to \`latest\` but the tag changed
+- **Missing imagePullSecrets** — Private registry access not configured
+
+### How to Debug:
+
+\`\`\`bash
+# Check pod events
+kubectl describe pod <pod-name> -n <namespace>
+
+# Check image pull status
+kubectl get events --field-selector involvedObject.name=<pod-name>
+
+# Verify image exists
+kubectl run debug --image=<image>:<tag> --rm -it --restart=Never
+\`\`\`
+
+### The Rule:
+
+> If the image doesn't pull, **stop here**. Nothing else matters until this works.
+
+---
+
+## 2️⃣ Pod Layer (Running ≠ Working)
+
+The pod is running. That doesn't mean it's working.
+
+### Common Issues:
+
+- **Missing env vars** 🌱 — Required environment variables not set
+- **Wrong configs** ⚙️ — ConfigMap or Secret mounted incorrectly
+- **Bad endpoints** 🌐 — Service endpoints pointing to wrong places
+
+### How to Debug:
+
+\`\`\`bash
+# Check pod logs
+kubectl logs <pod-name> -n <namespace>
+
+# Check environment variables
+kubectl exec <pod-name> -n <namespace> -- env
+
+# Check mounted configs
+kubectl describe pod <pod-name> -n <namespace> | grep -A 5 "ConfigMap"
+\`\`\`
+
+### The Rule:
+
+> Most issues live here. The pod runs, but it's not doing what it's supposed to.
+
+---
+
+## 3️⃣ Access Layer (IAM / Permissions)
+
+This is the layer that tricks you the most.
+
+### What Fails:
+
+Services fail to reach:
+- AWS RDS / DynamoDB  
+- S3 buckets  
+- External APIs  
+
+### Root Cause:
+
+- **Wrong IAM role** (IRSA) — Pod assumes wrong role
+- **Missing permissions** — Role doesn't have required actions
+
+### How to Debug:
+
+\`\`\`bash
+# Check which role the pod is using
+kubectl describe pod <pod-name> | grep "Service Account"
+
+# Check IAM role annotations
+kubectl get pod <pod-name> -o jsonpath='{.metadata.annotations}'
+
+# Check AWS credentials in pod
+kubectl exec <pod-name> -- aws sts get-caller-identity
+\`\`\`
+
+### The Rule:
+
+> Looks like app failure. It's access control. Always check IAM early.
+
+---
+
+## 4️⃣ Secrets Layer (The "Worked Yesterday" Problem)
+
+This is the silent killer in production.
+
+### What Happens:
+
+- **Secrets rotated** 🔑 — Credentials changed in secrets manager
+- **Pods using stale values** — No restart triggered
+- **No rollout triggered** — Deployment doesn't detect secret changes
+
+### How to Debug:
+
+\`\`\`bash
+# Check secret version
+kubectl get secret <secret-name> -n <namespace> -o yaml
+
+# Compare secret hash with pod's mounted secret
+kubectl describe pod <pod-name> | grep -i secret
+
+# Force pod restart
+kubectl rollout restart deployment/<deployment-name> -n <namespace>
+\`\`\`
+
+### The Rule:
+
+> Always suspect this early. "It worked yesterday" is the telltale sign.
+
+---
+
+## 5️⃣ Network Layer (Illusions)
+
+The service is "up" but unreachable.
+
+### What We Think:
+
+\`\`\`bash
+kubectl port-forward svc/<service> 8080:80
+# Works! → Must be fine
+\`\`\`
+
+### Reality:
+
+- **Wrong service selector** — Service points to wrong pods
+- **DNS issues** — CoreDNS not resolving correctly
+- **Security group misconfig** — Network policies blocking traffic
+
+### How to Debug:
+
+\`\`\`bash
+# Check service selector
+kubectl get svc <service-name> -n <namespace> -o jsonpath='{.spec.selector}'
+
+# Test DNS resolution
+kubectl exec <pod-name> -n <namespace> -- nslookup <service-name>
+
+# Check network policies
+kubectl get networkpolicies -n <namespace>
+\`\`\`
+
+### The Rule:
+
+> "Up" doesn't mean "reachable." Always verify actual connectivity.
+
+---
+
+## 6️⃣ Observability Layer (Truth Source)
+
+When you don't know where to look, let the signals guide you.
+
+### Tools:
+
+- **Prometheus** → metrics 📈  
+- **Loki / Elasticsearch** → logs 🔍  
+
+### The Rule:
+
+> **Metrics tell WHEN. Logs tell WHY.**
+
+Don't guess. Query the data.
+
+---
+
+## 7️⃣ Resource Layer
+
+Pods stuck in Pending state.
+
+### Common Causes:
+
+- **CPU/memory limits too low** — Resource requests exceed capacity
+- **Namespace quota exceeded** — Namespace resource limits hit
+- **Node selector issues** — Pods can't schedule to any node
+
+### How to Debug:
+
+\`\`\`bash
+# Check why pod is pending
+kubectl describe pod <pod-name> -n <namespace> | grep -A 10 "Events"
+
+# Check resource quotas
+kubectl get resourcequota -n <namespace>
+
+# Check node capacity
+kubectl describe nodes | grep -A 5 "Allocated resources"
+\`\`\`
+
+---
+
+## 8️⃣ Code Layer (Final Trap)
+
+Everything looks right, but something's still broken.
+
+### Common Issues:
+
+- **Dependency issues** — Library version conflicts
+- **Connection pool misconfig** — Too few / too many connections
+- **Missing retries** — No resilience for transient failures
+
+### How to Debug:
+
+\`\`\`bash
+# Check for OOM kills
+kubectl get events --field-selector reason=OOMKilled
+
+# Check connection pool settings
+kubectl exec <pod-name> -n <namespace> -- env | grep -i pool
+
+# Check for connection timeouts in logs
+kubectl logs <pod-name> -n <namespace> | grep -i timeout
+\`\`\`
+
+### The Rule:
+
+> Looks like infra. Isn't. Always check the code layer last.
+
+---
+
+## 🧠 Real Production Mindset
+
+Here's what separates engineers who own production from those who just deploy to it:
+
+### The Framework:
+
+1. **Debug layer by layer** — Image → Pod → Access → Network → Code
+2. **Check recent changes FIRST** 🔁 — Most incidents have recent changes as root cause
+3. **Trust signals (logs/metrics), not assumptions** — Data beats intuition
+4. **Reduce blast radius before deep diving** — Contain the damage first
+
+### The Mental Shift:
+
+- From: "What broke?"
+- To: "What changed?"
+
+---
+
+## ⚠️ Hard Truth
+
+Most "Kubernetes failures" are NOT Kubernetes problems.
+
+They are:
+- **Configuration gaps** ⚙️ — Missing env vars, wrong configs
+- **Access issues** 🔐 — IAM roles, permissions, secrets
+- **Visibility problems** 👁️ — No logs, no metrics, no tracing
+
+---
+
+## 💭 Final Thought
+
+The real skill isn't knowing kubectl commands.
+
+It's knowing **where to look first under pressure**.
+
+That separates engineers who deploy…  
+from engineers who own production.
+
+---
+
+## ❓ What's the FIRST signal you check when a deploy fails?
+
+Drop your answer in the comments. I'd love to learn what others prioritize in production incidents.
+
+---
+
+## 📚 Related Topics
+
+If you enjoyed this, you might also like:
+- Building a Real Microservices Platform with Spring Boot
+- Natural Language Agent for IT Operations
+- Intent-Driven Onboarding Systems`,
+  },
+
 ];
 
 export default posts;
